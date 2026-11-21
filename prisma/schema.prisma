@@ -1,0 +1,36 @@
+// Database schema for Dragons Solutions.
+// Development uses a local SQLite file so the site runs with zero setup.
+// For production, change `provider` to "postgresql", "mysql" or "sqlserver"
+// and point DATABASE_URL in .env at that server, then run `npm run db:push`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Inquiry {
+  id        String        @id @default(cuid())
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  name      String
+  company   String?
+  email     String
+  phone     String?
+  service   String        // service slug, e.g. "managed-it"
+  budget    String?
+  timeline  String?
+  message   String
+
+  status    String        @default("new") // new | contacted | proposal | won | lost
+  source    String?       // page the form was sent from
+  ip        String?
+  userAgent String?
+
+  @@index([createdAt])
+  @@index([status])
+}
