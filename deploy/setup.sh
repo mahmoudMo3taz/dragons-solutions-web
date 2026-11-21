@@ -29,7 +29,9 @@ info "System: $(. /etc/os-release; echo "$PRETTY_NAME"), RAM: $(free -h | awk '/
 info "Listening on 80/443:"
 ss -ltnp 2>/dev/null | awk 'NR==1 || /:80 |:443 /' | sed 's/^/      /'
 WEB=""
-if systemctl is-active --quiet nginx 2>/dev/null; then WEB="nginx"
+CADDYFILE="/etc/caddy/Caddyfile"
+if systemctl is-active --quiet caddy 2>/dev/null && [ -f "$CADDYFILE" ]; then WEB="caddy"
+elif systemctl is-active --quiet nginx 2>/dev/null; then WEB="nginx"
 elif systemctl is-active --quiet apache2 2>/dev/null; then WEB="apache"
 fi
 if ss -ltnp 2>/dev/null | grep -qE ":$PORT "; then
@@ -40,7 +42,7 @@ fi
 info "Web server in charge of ports 80/443: ${WEB:-none detected}"
 if [ -z "$WEB" ] && ss -ltnp 2>/dev/null | grep -qE ':(80|443) '; then
   echo
-  echo "Something other than Nginx/Apache (Docker, Caddy, a control panel...) owns ports 80/443."
+  echo "Something other than Caddy/Nginx/Apache (Docker, a control panel...) owns ports 80/443."
   echo "Stopping here without changing anything. Send this output to Claude."
   exit 2
 fi
@@ -94,7 +96,29 @@ if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/"; then info "Site answers loc
 
 # -----------------------------------------------------------------------------
 say "6/7  Adding $DOMAIN to $WEB (your other site is not touched)"
-if [ "$WEB" = "apache" ]; then
+if [ "$WEB" = "caddy" ]; then
+  # Caddy: add one site block at the end of the Caddyfile. Caddy gets the HTTPS
+  # certificate by itself. Backup first, validate, restore the backup on any error.
+  BACKUP="$CADDYFILE.bak-$(date +%Y%m%d-%H%M%S)"
+  cp -a "$CADDYFILE" "$BACKUP"
+  info "Backup of your Caddyfile: $BACKUP"
+  if grep -q "# BEGIN $SITE_NAME" "$CADDYFILE"; then
+    info "Site block already present, leaving it as is"
+  else
+    printf '\n# BEGIN %s (added by Dragons Solutions setup)\n%s, www.%s {\n\tencode gzip\n\treverse_proxy 127.0.0.1:%s\n}\n# END %s\n' \
+      "$SITE_NAME" "$DOMAIN" "$DOMAIN" "$PORT" "$SITE_NAME" >> "$CADDYFILE"
+  fi
+  if caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1 && systemctl reload caddy; then
+    info "Caddy reloaded with $DOMAIN added"
+  else
+    cp -a "$BACKUP" "$CADDYFILE"
+    systemctl reload caddy || true
+    echo "Caddy rejected the change, your original Caddyfile was restored."
+    caddy validate --config "$CADDYFILE" --adapter caddyfile || true
+    exit 1
+  fi
+  CERT_PLUGIN="caddy"
+elif [ "$WEB" = "apache" ]; then
   a2enmod proxy proxy_http headers >/dev/null
   CONF="/etc/apache2/sites-available/$SITE_NAME.conf"
   cat > "$CONF" <<EOF
@@ -125,6 +149,15 @@ fi
 
 # -----------------------------------------------------------------------------
 say "7/7  HTTPS certificate for $DOMAIN"
+if [ "$CERT_PLUGIN" = "caddy" ]; then
+  info "Caddy requests the certificate automatically."
+  sleep 20
+  if curl -fsS -o /dev/null --max-time 20 "https://$DOMAIN/"; then info "https://$DOMAIN is live."; else info "Certificate still being issued; check https://$DOMAIN in a minute (journalctl -u caddy shows progress)."; fi
+  say "Done. Dragons Solutions is running."
+  info "Status:  pm2 status        Logs:  pm2 logs $SITE_NAME"
+  info "Update later:  bash $APP_DIR/deploy/update.sh"
+  exit 0
+fi
 apt-get install -y -qq certbot "python3-certbot-$CERT_PLUGIN" >/dev/null
 SERVER_IP=$(curl -fsS4 https://ifconfig.me || hostname -I | awk '{print $1}')
 DNS_IP=$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}' || true)
